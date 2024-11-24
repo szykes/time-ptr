@@ -121,7 +121,9 @@ func TestTime(t *testing.T) {
 
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
-			timeService := TimeService{}
+			timeService := TimeService{
+				timePtrStore: NewTimePtrStore(),
+			}
 
 			if len(tc.contentTypes) > 0 {
 				for _, contentType := range tc.contentTypes {
@@ -164,7 +166,9 @@ func TestTime_Concurrency(t *testing.T) {
 		wg.Done()
 	}
 
-	timeService := TimeService{}
+	timeService := TimeService{
+		timePtrStore: NewTimePtrStore(),
+	}
 	var wg sync.WaitGroup
 	for i := 0; i < 10; i++ {
 		wg.Add(2)
