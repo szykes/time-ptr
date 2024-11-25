@@ -7,12 +7,11 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
-	"unsafe"
+	"unicode"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -23,35 +22,62 @@ func main() {
 	client()
 }
 
-type TimePtrStore struct {
+var errTimeNotFound = errors.New("time not found")
+
+type TimeStore struct {
 	store sync.Map
 }
 
-func NewTimePtrStore() TimePtrStore {
-	return TimePtrStore{
+func NewTimeStore() TimeStore {
+	return TimeStore{
 		store: sync.Map{},
 	}
 }
 
-func (t *TimePtrStore) SetPtr(ptr *time.Time) {
-	t.store.Store("ptr", ptr)
+func (t *TimeStore) WriteAsString(s string) error {
+	if !t.isValidUnixTime(s) {
+		return errors.New("Not valid Unix time format")
+	}
+	t.store.Store("time", s)
+	return nil
 }
 
-func (t *TimePtrStore) Ptr() (*time.Time, error) {
-	valueAsAny, ok := t.store.Load("ptr")
-	if !ok {
-		return nil, nil
+func (t *TimeStore) isValidUnixTime(s string) bool {
+	// leading zeros?
+	if len(s) > 10 || len(s) == 0 {
+		return false
+	}
+	for _, c := range s {
+		if !unicode.IsDigit(c) {
+			return false
+		}
 	}
 
-	value, ok := valueAsAny.(*time.Time)
+	if len(s) == 10 && s[0] >= '2' &&
+		s[1] >= '1' && s[2] >= '4' && s[3] >= '7' &&
+		s[4] >= '4' && s[5] >= '8' && s[6] >= '3' &&
+		s[7] >= '6' && s[8] >= '4' && s[9] > '7' {
+		// data in s is greater than 2,147,483,647
+		return false
+	}
+	return true
+}
+
+func (t *TimeStore) ReadAsString() (string, error) {
+	valueAsAny, ok := t.store.Load("time")
 	if !ok {
-		return nil, errors.New("retrieve TimePtr: type cast issue")
+		return "", fmt.Errorf("retrieve Time: %w", errTimeNotFound)
+	}
+
+	value, ok := valueAsAny.(string)
+	if !ok {
+		return "", errors.New("retrieve Time: type cast issue")
 	}
 	return value, nil
 }
 
 type TimeService struct {
-	timePtrStore TimePtrStore
+	timeStore TimeStore
 }
 
 func (t *TimeService) Update(w http.ResponseWriter, r *http.Request) {
@@ -68,43 +94,33 @@ func (t *TimeService) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ptr, err := t.hexInStringToTimePtr(data.String())
+	err = t.timeStore.WriteAsString(data.String())
 	if err != nil {
-		http.Error(w, "Not valid data, not matching with regex: ^0x((0{1})|([0-9a-fA-F]{<depends on the architecture>}))$", http.StatusBadRequest)
+		http.Error(w, "Not valid Unix time", http.StatusBadRequest)
 		return
 	}
-	t.timePtrStore.SetPtr(ptr)
 }
 
 func (t *TimeService) Read(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain")
-	data, err := t.timePtrStore.Ptr()
+
+	data, err := t.timeStore.ReadAsString()
 	if err != nil {
+		if errors.Is(err, errTimeNotFound) {
+			http.Error(w, "Time has not been set yet.", http.StatusNotFound)
+			return
+		}
 		log.Printf("ERROR: time service - read: %v", err.Error())
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
 
-	fmt.Fprintf(w, "%p", data)
-}
-
-func (t *TimeService) hexInStringToTimePtr(s string) (*time.Time, error) {
-	if len(s) <= 2 || s[0] != '0' || s[1] != 'x' {
-		return nil, errors.New("hex string to time ptr: not an address")
-	}
-
-	value, err := strconv.ParseUint(s[2:], 16, strconv.IntSize)
-	if err != nil {
-		return nil, errors.New("hex string to time ptr: not a valid address")
-	}
-
-	ptr := (*time.Time)(unsafe.Pointer(uintptr(value)))
-	return ptr, nil
+	fmt.Fprintf(w, "%v", data)
 }
 
 func app() {
 	timeService := TimeService{
-		timePtrStore: NewTimePtrStore(),
+		timeStore: NewTimeStore(),
 	}
 
 	r := chi.NewRouter()
@@ -153,9 +169,8 @@ func waitForServer(url string) {
 }
 
 func post(url string) {
-	t := time.Now()
-	address := fmt.Sprintf("%p", &t)
-	_, _ = http.Post(url, "text/plain", bytes.NewBufferString(address))
+	t := fmt.Sprintf("%v", time.Now().Unix())
+	_, _ = http.Post(url, "text/plain", bytes.NewBufferString(t))
 }
 
 func get(url string) {
@@ -163,7 +178,5 @@ func get(url string) {
 	var data strings.Builder
 	_, _ = io.Copy(&data, res.Body)
 
-	value, _ := strconv.ParseUint(data.String()[2:], 16, strconv.IntSize)
-	ptr := (*time.Time)(unsafe.Pointer(uintptr(value)))
-	fmt.Println(ptr.Unix())
+	fmt.Println(data.String())
 }
